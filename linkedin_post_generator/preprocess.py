@@ -5,15 +5,34 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable, TypeVar
 
 from .config import get_paths
 from .llm import extract_response_text, get_llm
 from .models import PostRecord, ProcessedPost, SUPPORTED_LANGUAGES, normalize_tags
+from .quality import (
+    build_text_preview,
+    get_low_quality_reason,
+    sanitize_post_text,
+)
+
+DEFAULT_MAX_RETRIES = 3
+T = TypeVar("T")
 
 
 class LLMResponseError(ValueError):
     """Raised when the model returns invalid or incomplete JSON."""
+
+
+class LLMInvocationError(RuntimeError):
+    """Raised when an LLM call fails before a response can be parsed."""
+
+
+class LowQualityPostError(ValueError):
+    """Raised when a post is filtered out for low data quality."""
+
+
+RETRYABLE_PREPROCESSING_ERRORS = (LLMResponseError, LLMInvocationError)
 
 
 def build_metadata_prompt(post: str) -> str:
@@ -91,7 +110,10 @@ def invoke_json_prompt(prompt: str, *, llm_client: Any | None = None) -> dict[st
     """Execute a prompt and parse the response as JSON."""
 
     client = llm_client or get_llm()
-    response = client.invoke(prompt)
+    try:
+        response = client.invoke(prompt)
+    except Exception as error:
+        raise LLMInvocationError(f"LLM invocation failed: {error}") from error
     return parse_json_object(extract_response_text(response))
 
 
@@ -106,8 +128,13 @@ def _validate_metadata(payload: dict[str, Any]) -> dict[str, Any]:
     if language not in SUPPORTED_LANGUAGES:
         raise LLMResponseError(f"Unsupported language {language!r} returned by the model.")
 
+    try:
+        line_count = int(payload["line_count"])
+    except (TypeError, ValueError) as error:
+        raise LLMResponseError("Metadata response contained a non-integer line_count.") from error
+
     return {
-        "line_count": int(payload["line_count"]),
+        "line_count": line_count,
         "language": language,
         "tags": normalize_tags(payload["tags"])[:2],
     }
@@ -142,16 +169,118 @@ def get_unified_tags(
     return {str(key): str(value).strip() for key, value in payload.items() if str(value).strip()}
 
 
+def _build_sidecar_path(target_path: Path, label: str) -> Path:
+    """Build a sidecar JSON path beside the processed output."""
+
+    return target_path.with_name(f"{target_path.stem}.{label}.json")
+
+
+def _load_checkpoint(checkpoint_path: Path) -> dict[int, dict[str, Any]]:
+    """Load checkpointed successful records indexed by source position."""
+
+    if not checkpoint_path.exists():
+        return {}
+
+    with checkpoint_path.open(encoding="utf-8") as file:
+        payload = json.load(file)
+
+    if not isinstance(payload, dict) or not isinstance(payload.get("records"), list):
+        raise ValueError("Checkpoint file is malformed; expected an object with a 'records' list.")
+
+    checkpointed_posts: dict[int, dict[str, Any]] = {}
+    for item in payload["records"]:
+        if not isinstance(item, dict) or "index" not in item or "post" not in item:
+            raise ValueError("Checkpoint record is malformed.")
+        index = int(item["index"])
+        checkpointed_posts[index] = ProcessedPost.from_mapping(item["post"], index=index).to_dict()
+    return checkpointed_posts
+
+
+def _write_checkpoint(checkpoint_path: Path, checkpointed_posts: dict[int, dict[str, Any]]) -> None:
+    """Write checkpointed successful records to disk."""
+
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "records": [
+            {"index": index, "post": checkpointed_posts[index]}
+            for index in sorted(checkpointed_posts)
+        ]
+    }
+    with checkpoint_path.open("w", encoding="utf-8") as file:
+        json.dump(payload, file, ensure_ascii=False, indent=2)
+
+
+def _write_failures_report(failures_path: Path, failures: list[dict[str, Any]]) -> None:
+    """Write the preprocessing failures report to disk."""
+
+    failures_path.parent.mkdir(parents=True, exist_ok=True)
+    with failures_path.open("w", encoding="utf-8") as file:
+        json.dump(failures, file, ensure_ascii=False, indent=2)
+
+
+def _build_failure_record(
+    index: int | None,
+    *,
+    stage: str,
+    reason: str,
+    text: str,
+    error: BaseException | None = None,
+    attempts: int | None = None,
+) -> dict[str, Any]:
+    """Build a structured failure record for the sidecar report."""
+
+    return {
+        "index": index,
+        "stage": stage,
+        "reason": reason,
+        "error_type": type(error).__name__ if error is not None else "",
+        "error_message": str(error) if error is not None else "",
+        "attempts": attempts,
+        "text_preview": build_text_preview(text),
+    }
+
+
+def _run_with_retries(operation: Callable[[], T], *, max_retries: int) -> tuple[T, int]:
+    """Run a retryable operation and return its result plus attempt count."""
+
+    attempts = max(max_retries, 0) + 1
+    for attempt in range(1, attempts + 1):
+        try:
+            return operation(), attempt
+        except RETRYABLE_PREPROCESSING_ERRORS:
+            if attempt == attempts:
+                raise
+    raise RuntimeError("Retry loop exited unexpectedly.")
+
+
 def process_posts(
     raw_file_path: str | Path,
     processed_file_path: str | Path | None = None,
     *,
     llm_client: Any | None = None,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    resume: bool = True,
+    checkpoint_file_path: str | Path | None = None,
+    failures_file_path: str | Path | None = None,
 ) -> list[dict[str, Any]]:
     """Read raw posts, enrich them with metadata, and persist the processed dataset."""
 
     source_path = Path(raw_file_path)
-    target_path = Path(processed_file_path) if processed_file_path is not None else get_paths().processed_posts_path
+    target_path = (
+        Path(processed_file_path)
+        if processed_file_path is not None
+        else get_paths().processed_posts_path
+    )
+    checkpoint_path = (
+        Path(checkpoint_file_path)
+        if checkpoint_file_path is not None
+        else _build_sidecar_path(target_path, "checkpoint")
+    )
+    failures_path = (
+        Path(failures_file_path)
+        if failures_file_path is not None
+        else _build_sidecar_path(target_path, "failures")
+    )
 
     with source_path.open(encoding="utf-8") as file:
         payload = json.load(file)
@@ -159,29 +288,119 @@ def process_posts(
     if not isinstance(payload, list):
         raise ValueError("Raw posts JSON must contain a list of posts.")
 
-    enriched_posts: list[dict[str, Any]] = []
+    checkpointed_posts = _load_checkpoint(checkpoint_path) if resume else {}
+    successful_posts = {
+        index: post
+        for index, post in checkpointed_posts.items()
+        if 0 <= index < len(payload)
+    }
+    failures: list[dict[str, Any]] = []
+
     for index, item in enumerate(payload):
+        if index in successful_posts:
+            continue
         if not isinstance(item, dict):
             raise ValueError(f"Raw post at index {index} is not an object.")
 
         raw_post = PostRecord.from_mapping(item, index=index)
-        metadata = extract_metadata(raw_post.text, llm_client=llm_client)
+        low_quality_reason = get_low_quality_reason(raw_post.text)
+        if low_quality_reason is not None:
+            failures.append(
+                _build_failure_record(
+                    index,
+                    stage="quality_filter",
+                    reason="filtered_low_quality",
+                    text=raw_post.text,
+                    error=LowQualityPostError(low_quality_reason),
+                    attempts=1,
+                )
+            )
+            continue
+
+        cleaned_text = sanitize_post_text(raw_post.text)
+        try:
+            metadata, _ = _run_with_retries(
+                lambda: extract_metadata(cleaned_text, llm_client=llm_client),
+                max_retries=max_retries,
+            )
+        except RETRYABLE_PREPROCESSING_ERRORS as error:
+            failures.append(
+                _build_failure_record(
+                    index,
+                    stage="metadata_extraction",
+                    reason="retry_exhausted",
+                    text=raw_post.text,
+                    error=error,
+                    attempts=max(max_retries, 0) + 1,
+                )
+            )
+            continue
+
         processed_post = ProcessedPost(
-            text=raw_post.text,
+            text=cleaned_text,
             engagement=raw_post.engagement,
             line_count=metadata["line_count"],
             language=metadata["language"],
             tags=metadata["tags"],
         )
-        enriched_posts.append(processed_post.to_dict())
+        successful_posts[index] = processed_post.to_dict()
+        _write_checkpoint(checkpoint_path, successful_posts)
 
-    unified_tags = get_unified_tags(enriched_posts, llm_client=llm_client)
-    for post in enriched_posts:
-        normalized_tags = [unified_tags.get(tag, tag) for tag in normalize_tags(post.get("tags", []))]
-        post["tags"] = list(dict.fromkeys(normalized_tags))
+    unified_tags: dict[str, str] = {}
+    if successful_posts:
+        try:
+            unified_tags, _ = _run_with_retries(
+                lambda: get_unified_tags(successful_posts.values(), llm_client=llm_client),
+                max_retries=max_retries,
+            )
+        except RETRYABLE_PREPROCESSING_ERRORS as error:
+            failures.append(
+                _build_failure_record(
+                    None,
+                    stage="tag_unification",
+                    reason="retry_exhausted",
+                    text="",
+                    error=error,
+                    attempts=max(max_retries, 0) + 1,
+                )
+            )
+
+    retained_checkpoint_posts: dict[int, dict[str, Any]] = {}
+    final_posts: list[dict[str, Any]] = []
+    for index in sorted(successful_posts):
+        checkpoint_post = successful_posts[index]
+        cleaned_text = sanitize_post_text(checkpoint_post.get("text", ""))
+        low_quality_reason = get_low_quality_reason(cleaned_text or checkpoint_post.get("text", ""))
+        if low_quality_reason is not None:
+            failures.append(
+                _build_failure_record(
+                    index,
+                    stage="final_quality_filter",
+                    reason="filtered_low_quality",
+                    text=cleaned_text,
+                    error=LowQualityPostError(low_quality_reason),
+                    attempts=1,
+                )
+            )
+            continue
+
+        retained_checkpoint_posts[index] = checkpoint_post
+        normalized_tags = [
+            unified_tags.get(tag, tag)
+            for tag in normalize_tags(checkpoint_post.get("tags", []))
+        ]
+        final_posts.append(
+            {
+                **checkpoint_post,
+                "text": cleaned_text,
+                "tags": list(dict.fromkeys(normalized_tags)),
+            }
+        )
 
     target_path.parent.mkdir(parents=True, exist_ok=True)
     with target_path.open(encoding="utf-8", mode="w") as outfile:
-        json.dump(enriched_posts, outfile, ensure_ascii=False, indent=4)
+        json.dump(final_posts, outfile, ensure_ascii=False, indent=4)
 
-    return enriched_posts
+    _write_checkpoint(checkpoint_path, retained_checkpoint_posts)
+    _write_failures_report(failures_path, failures)
+    return final_posts

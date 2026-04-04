@@ -92,3 +92,69 @@ def test_categorize_length_is_stable():
     assert categorize_length(0) == "Short"
     assert categorize_length(5) == "Medium"
     assert categorize_length(11) == "Long"
+
+
+def test_repository_ranks_richer_examples_above_short_viral_titles(tmp_path):
+    rich_text = (
+        "Actionable AI career advice\n"
+        "Build projects that solve real problems\n"
+        "Share the outcome publicly\n"
+        "Keep iterating on feedback"
+    )
+    dataset_path = tmp_path / "processed_posts.json"
+    dataset_path.write_text(
+        json.dumps(
+            [
+                {
+                    "text": "AI jobs",
+                    "engagement": 100000,
+                    "line_count": 1,
+                    "language": "English",
+                    "tags": ["AI"],
+                },
+                {
+                    "text": rich_text,
+                    "engagement": 50,
+                    "line_count": 4,
+                    "language": "English",
+                    "tags": ["AI"],
+                },
+                {
+                    "text": rich_text,
+                    "engagement": 5,
+                    "line_count": 4,
+                    "language": "English",
+                    "tags": ["AI"],
+                },
+                {
+                    "text": "Activate to view larger image,",
+                    "engagement": 500,
+                    "line_count": 1,
+                    "language": "English",
+                    "tags": ["Noise"],
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    repository = FewShotPosts(dataset_path)
+    ranked_posts = repository.get_filtered_posts("Short", "English", "AI")
+
+    assert repository.get_tags() == ["AI"]
+    assert ranked_posts == [
+        {
+            "text": rich_text,
+            "engagement": 50,
+            "line_count": 4,
+            "language": "English",
+            "tags": ["AI"],
+        },
+        {
+            "text": "AI jobs",
+            "engagement": 100000,
+            "line_count": 1,
+            "language": "English",
+            "tags": ["AI"],
+        },
+    ]

@@ -30,3 +30,11 @@ def test_clean_post_text_and_fingerprint_normalize_noise():
 
     assert cleaned == "Hello world! #python"
     assert fingerprint_text(cleaned) == "hello world #python"
+
+
+def test_clean_post_text_drops_placeholder_lines_and_repairs_text():
+    cleaned = clean_post_text(
+        "I\u00e2\u20ac\u2122m building this\nActivate to view larger image,\nmore context"
+    )
+
+    assert cleaned == "I’m building this\nMore context"

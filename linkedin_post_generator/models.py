@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any, Mapping
 
+from .quality import normalize_post_text
+
 SUPPORTED_LANGUAGES = {"English", "Hinglish"}
 
 
@@ -48,7 +50,7 @@ class PostRecord:
     def from_mapping(cls, data: Mapping[str, Any], *, index: int | None = None) -> "PostRecord":
         """Create a raw post from a JSON record."""
 
-        text = str(data.get("text", "")).strip()
+        text = normalize_post_text(data.get("text", ""))
         if not text:
             location = f" at index {index}" if index is not None else ""
             raise ValueError(f"Missing post text{location}.")

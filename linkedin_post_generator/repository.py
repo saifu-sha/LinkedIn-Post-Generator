@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 from .config import get_paths
 from .models import ProcessedPost
+from .quality import build_text_fingerprint, is_low_quality_post, score_post_example
 
 
 def categorize_length(line_count: int) -> str:
@@ -40,7 +42,14 @@ class FewShotPosts:
     def __init__(self, file_path: str | Path | None = None) -> None:
         self.file_path = Path(file_path) if file_path is not None else get_paths().processed_posts_path
         self.posts = load_processed_posts(self.file_path)
-        self.unique_tags = sorted({tag for post in self.posts for tag in post.tags})
+        self.unique_tags = sorted(
+            {
+                tag
+                for post in self.posts
+                if not is_low_quality_post(post.text)
+                for tag in post.tags
+            }
+        )
 
     def get_tags(self) -> list[str]:
         """Return all available tags in sorted order."""
@@ -50,13 +59,37 @@ class FewShotPosts:
     def get_filtered_posts(self, length: str, language: str, tag: str) -> list[dict[str, Any]]:
         """Return posts matching the requested length, language, and tag."""
 
-        return [
-            post.to_dict()
+        matching_posts = [
+            post
             for post in self.posts
             if post.language == language
             and categorize_length(post.line_count) == length
             and tag in post.tags
+            and not is_low_quality_post(post.text)
         ]
+
+        best_by_fingerprint: dict[str, tuple[float, ProcessedPost]] = {}
+        for post in matching_posts:
+            fingerprint = build_text_fingerprint(post.text)
+            if not fingerprint:
+                continue
+
+            score = score_post_example(
+                post.text,
+                engagement=post.engagement,
+                tags=post.tags,
+                line_count=post.line_count,
+            )
+            current_best = best_by_fingerprint.get(fingerprint)
+            if current_best is None or score > current_best[0]:
+                best_by_fingerprint[fingerprint] = (score, post)
+
+        ranked_posts = sorted(
+            best_by_fingerprint.values(),
+            key=lambda item: item[0],
+            reverse=True,
+        )
+        return [asdict(post) for _, post in ranked_posts]
 
 
 @lru_cache(maxsize=1)

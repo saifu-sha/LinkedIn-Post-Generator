@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
-import html
 import re
 from typing import Any
+
+from ..quality import (
+    build_text_fingerprint,
+    normalize_post_text,
+    repair_common_encoding_issues,
+    sanitize_post_text,
+)
 
 ABBREVIATED_NUMBER_PATTERN = re.compile(
     r"\b(\d{1,3}(?:[.,]\d{3})+|\d+(?:\.\d+)?(?:\s?[KkMm])?)\b"
@@ -27,8 +33,7 @@ MAGNITUDE_PATTERN = re.compile(
 def basic_clean(value: Any) -> str:
     """Apply light HTML and whitespace cleanup to scraped text."""
 
-    cleaned = "" if value is None else str(value)
-    cleaned = html.unescape(cleaned)
+    cleaned = repair_common_encoding_issues("" if value is None else str(value))
     cleaned = re.sub(r"http\S+|www\.\S+", "", cleaned)
     cleaned = re.sub(r"<[^>]+>", "", cleaned)
     cleaned = re.sub(r"\r\n?", "\n", cleaned)
@@ -64,7 +69,7 @@ def sentence_capitalize(text: str) -> str:
     def capitalize_match(match: re.Match[str]) -> str:
         return match.group(1) + match.group(2).upper()
 
-    normalized = re.sub(r"(^|[.!?\n]\s+)([a-z])", capitalize_match, normalized)
+    normalized = re.sub(r"(^|[.!?\n]\s*)([a-z])", capitalize_match, normalized)
     normalized = re.sub(r"\bi\b", "I", normalized)
     normalized = re.sub(r" *\n *", "\n", normalized)
     return normalized.strip()
@@ -88,14 +93,14 @@ def clean_post_text(raw_text: str | None) -> str:
         return ""
 
     cleaned = basic_clean(raw_text)
-    cleaned = re.sub(r"\s*[â€¢Â·â€”â€“]\s*", "\n", cleaned)
+    cleaned = re.sub(r"\s*[\u2022\u00b7\u2014\u2013]\s*", "\n", cleaned)
     lines = [line.strip() for line in cleaned.split("\n")]
     cleaned = "\n".join(line for line in lines if line)
     cleaned = sentence_capitalize(cleaned)
     cleaned = simple_normalize_hashtags(cleaned)
     cleaned = re.sub(r"[ \t]+$", "", cleaned, flags=re.MULTILINE)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
-    return cleaned.strip()
+    return sanitize_post_text(cleaned)
 
 
 def convert_abbreviated_to_number(value: str | int | float | None) -> int:
@@ -150,7 +155,7 @@ def extract_likes_from_text_blob(text_blob: str | None) -> int:
 def normalize_inline_text(text: str | None) -> str:
     """Collapse inline whitespace."""
 
-    return re.sub(r"\s+", " ", text or "").strip()
+    return normalize_post_text(text, preserve_lines=False)
 
 
 def response_preview(response: Any, limit: int = 240) -> str:
@@ -174,13 +179,4 @@ def response_preview(response: Any, limit: int = 240) -> str:
 def fingerprint_text(text: str | None) -> str:
     """Build a stable fingerprint for deduplicating posts."""
 
-    if not text:
-        return ""
-
-    normalized = text.strip().lower()
-    normalized = re.sub(r"\r\n?", "\n", normalized)
-    normalized = re.sub(r"\n\s+", "\n", normalized)
-    normalized = re.sub(r"[^\w\s#\n]", "", normalized)
-    normalized = re.sub(r"[ \t]+", " ", normalized)
-    normalized = re.sub(r"\n+", "\n", normalized)
-    return normalized.strip()
+    return build_text_fingerprint(text)
