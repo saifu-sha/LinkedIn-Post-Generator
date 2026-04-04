@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "linkedin-post-generator"
+version = "0.1.0"
+description = "Scrape, preprocess, and generate LinkedIn posts with a Groq-backed LLM."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "beautifulsoup4>=4.12",
+    "langchain-groq>=0.2.0",
+    "python-dotenv>=1.0.1",
+    "requests>=2.32.0",
+    "selenium>=4.25.0",
+    "selenium-stealth>=1.0.6",
+    "streamlit>=1.38.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "ruff>=0.6.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["linkedin_post_generator*"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"

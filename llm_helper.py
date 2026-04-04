@@ -1,13 +1,7 @@
-from dotenv import load_dotenv
-from langchain_groq import ChatGroq
-import os
-from pathlib import Path
+"""Compatibility wrapper exposing a lazy `llm` object."""
 
-ENV_PATH = Path(__file__).resolve().parent / ".env"
-load_dotenv(dotenv_path=ENV_PATH)
+from linkedin_post_generator.llm import LazyLLM, get_llm
 
-llm = ChatGroq(groq_api_key=os.getenv("GROQ_API_KEY"), model="meta-llama/llama-4-scout-17b-16e-instruct")
+llm = LazyLLM()
 
-if __name__ == "__main__":
-    response = llm.invoke("What are the two main ingradients in samosa")
-    print(response.content)
+__all__ = ["LazyLLM", "get_llm", "llm"]
