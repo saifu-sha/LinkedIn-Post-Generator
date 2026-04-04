@@ -14,7 +14,7 @@ LENGTH_TO_DESCRIPTION = {
     "Medium": "6 to 10 lines",
     "Long": "11 to 15 lines",
 }
-MAX_EXAMPLES = 3
+MAX_EXAMPLES = 5
 
 
 def get_length_str(length: str) -> str:
@@ -40,16 +40,21 @@ def build_prompt(length: str, language: str, tag: str, examples: Iterable[dict[s
         "The script for the generated post should always be English.",
     ]
 
-    example_texts = [
-        str(example.get("text", "")).strip()
+    prompt_examples = [
+        example
         for example in list(examples)[:MAX_EXAMPLES]
         if str(example.get("text", "")).strip()
     ]
-    if example_texts:
+    if prompt_examples:
         prompt_parts.append("4) Use the writing style as per the following examples.")
-        for index, text in enumerate(example_texts, start=1):
+        for index, example in enumerate(prompt_examples, start=1):
+            text = str(example.get("text", "")).strip()
+            match_label = str(example.get("match_label", "")).strip()
+            example_heading = f"Example {index}"
+            if match_label:
+                example_heading += f" ({match_label})"
             prompt_parts.append("")
-            prompt_parts.append(f"Example {index}")
+            prompt_parts.append(example_heading)
             prompt_parts.append(text)
 
     return "\n".join(prompt_parts).strip()
@@ -59,7 +64,7 @@ def get_prompt(length: str, language: str, tag: str, repository: FewShotPosts | 
     """Compatibility wrapper that builds the prompt from stored examples."""
 
     examples_repo = repository or get_default_repository()
-    examples = examples_repo.get_filtered_posts(length, language, tag)
+    examples = examples_repo.get_prompt_examples(length, language, tag, limit=MAX_EXAMPLES)
     return build_prompt(length, language, tag, examples)
 
 

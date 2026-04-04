@@ -12,6 +12,13 @@ from .config import get_paths
 from .models import ProcessedPost
 from .quality import build_text_fingerprint, is_low_quality_post, score_post_example
 
+MATCH_LABELS = {
+    "exact_match": "Exact match",
+    "same_tag_same_language": "Same tag and language; length relaxed",
+    "same_tag_any_language": "Same tag; language and length relaxed",
+    "global_best": "Global fallback",
+}
+
 
 def categorize_length(line_count: int) -> str:
     """Map a line count to the UI length buckets."""
@@ -56,20 +63,11 @@ class FewShotPosts:
 
         return list(self.unique_tags)
 
-    def get_filtered_posts(self, length: str, language: str, tag: str) -> list[dict[str, Any]]:
-        """Return posts matching the requested length, language, and tag."""
+    def _rank_posts(self, posts: list[ProcessedPost]) -> list[ProcessedPost]:
+        """Deduplicate and rank candidate posts by example quality."""
 
-        matching_posts = [
-            post
-            for post in self.posts
-            if post.language == language
-            and categorize_length(post.line_count) == length
-            and tag in post.tags
-            and not is_low_quality_post(post.text)
-        ]
-
-        best_by_fingerprint: dict[str, tuple[float, ProcessedPost]] = {}
-        for post in matching_posts:
+        best_by_fingerprint: dict[str, tuple[float, int, int, ProcessedPost]] = {}
+        for post in posts:
             fingerprint = build_text_fingerprint(post.text)
             if not fingerprint:
                 continue
@@ -80,16 +78,105 @@ class FewShotPosts:
                 tags=post.tags,
                 line_count=post.line_count,
             )
+            ranking = (score, post.engagement, len(post.text))
             current_best = best_by_fingerprint.get(fingerprint)
-            if current_best is None or score > current_best[0]:
-                best_by_fingerprint[fingerprint] = (score, post)
+            if current_best is None or ranking > current_best[:3]:
+                best_by_fingerprint[fingerprint] = (*ranking, post)
 
         ranked_posts = sorted(
             best_by_fingerprint.values(),
-            key=lambda item: item[0],
+            key=lambda item: item[:3],
             reverse=True,
         )
-        return [asdict(post) for _, post in ranked_posts]
+        return [post for _, _, _, post in ranked_posts]
+
+    def _get_exact_match_posts(self, length: str, language: str, tag: str) -> list[ProcessedPost]:
+        """Return exact-match usable posts before serialization."""
+
+        return [
+            post
+            for post in self.posts
+            if post.language == language
+            and categorize_length(post.line_count) == length
+            and tag in post.tags
+            and not is_low_quality_post(post.text)
+        ]
+
+    def get_filtered_posts(self, length: str, language: str, tag: str) -> list[dict[str, Any]]:
+        """Return posts matching the requested length, language, and tag."""
+
+        ranked_posts = self._rank_posts(
+            self._get_exact_match_posts(length, language, tag)
+        )
+        return [asdict(post) for post in ranked_posts]
+
+    def get_prompt_examples(
+        self,
+        length: str,
+        language: str,
+        tag: str,
+        *,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Return prompt-ready examples with fallback provenance."""
+
+        if limit <= 0:
+            return []
+
+        tiered_candidates = [
+            (
+                "exact_match",
+                self._get_exact_match_posts(length, language, tag),
+            ),
+            (
+                "same_tag_same_language",
+                [
+                    post
+                    for post in self.posts
+                    if post.language == language
+                    and tag in post.tags
+                    and not is_low_quality_post(post.text)
+                ],
+            ),
+            (
+                "same_tag_any_language",
+                [
+                    post
+                    for post in self.posts
+                    if tag in post.tags
+                    and not is_low_quality_post(post.text)
+                ],
+            ),
+            (
+                "global_best",
+                [
+                    post
+                    for post in self.posts
+                    if not is_low_quality_post(post.text)
+                ],
+            ),
+        ]
+
+        selected_examples: list[dict[str, Any]] = []
+        seen_fingerprints: set[str] = set()
+        for match_tier, candidates in tiered_candidates:
+            for post in self._rank_posts(candidates):
+                fingerprint = build_text_fingerprint(post.text)
+                if not fingerprint or fingerprint in seen_fingerprints:
+                    continue
+
+                seen_fingerprints.add(fingerprint)
+                selected_examples.append(
+                    {
+                        **asdict(post),
+                        "match_tier": match_tier,
+                        "match_label": MATCH_LABELS[match_tier],
+                    }
+                )
+                if len(selected_examples) >= limit:
+                    return selected_examples
+
+        return selected_examples
 
 
 @lru_cache(maxsize=1)
