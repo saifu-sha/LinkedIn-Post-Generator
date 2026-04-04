@@ -29,6 +29,17 @@ LOW_SIGNAL_LINES = frozenset(
         "video player",
     }
 )
+TRAILING_CTA_PREFIXES = (
+    "read more",
+    "learn more",
+    "watch here",
+    "watch the replay",
+    "catch up",
+    "hope you take a moment to watch",
+    "i wrote more about this here",
+)
+SENTENCE_SPLIT_PATTERN = re.compile(r"(?<=[.!?])\s+")
+WORD_PATTERN = re.compile(r"\b\w+\b")
 
 
 def _looks_like_mojibake(text: str) -> bool:
@@ -96,6 +107,52 @@ def _normalize_comparison_text(text: str) -> str:
     return normalized.strip()
 
 
+def _is_symbol_only_line(text: str) -> bool:
+    normalized = normalize_post_text(text, preserve_lines=False)
+    return bool(normalized) and not any(character.isalnum() for character in normalized)
+
+
+def _matches_trailing_cta(text: str) -> bool:
+    normalized = _normalize_comparison_text(text)
+    if not normalized:
+        return False
+    return any(
+        normalized == prefix or normalized.startswith(prefix + " ")
+        for prefix in TRAILING_CTA_PREFIXES
+    )
+
+
+def _strip_trailing_cta_fragment(line: str) -> str:
+    current = normalize_post_text(line, preserve_lines=False)
+    while current:
+        sentences = [segment.strip() for segment in SENTENCE_SPLIT_PATTERN.split(current) if segment.strip()]
+        if not sentences:
+            return ""
+
+        last_sentence = sentences[-1]
+        if _matches_trailing_cta(last_sentence):
+            sentences.pop()
+            current = normalize_post_text(" ".join(sentences), preserve_lines=False)
+            continue
+
+        if len(sentences) == 1 and _matches_trailing_cta(current):
+            return ""
+        break
+    return current
+
+
+def _contains_only_removable_tail_content(text: str) -> bool:
+    lines = [line.strip() for line in normalize_post_text(text, preserve_lines=True).splitlines() if line.strip()]
+    if not lines:
+        return False
+
+    for line in lines:
+        stripped_line = _strip_trailing_cta_fragment(line)
+        if stripped_line and not _is_symbol_only_line(stripped_line):
+            return False
+    return True
+
+
 def sanitize_post_text(text: str | None) -> str:
     """Drop obvious media placeholders while preserving meaningful content."""
 
@@ -108,7 +165,25 @@ def sanitize_post_text(text: str | None) -> str:
         for line in normalized.splitlines()
         if _normalize_comparison_text(line) not in LOW_SIGNAL_LINES
     ]
+
+    while cleaned_lines:
+        cleaned_lines[-1] = _strip_trailing_cta_fragment(cleaned_lines[-1])
+        tail_line = cleaned_lines[-1].strip() if cleaned_lines[-1] else ""
+        if not tail_line or _is_symbol_only_line(tail_line) or _matches_trailing_cta(tail_line):
+            cleaned_lines.pop()
+            continue
+        break
+
     return normalize_post_text("\n".join(cleaned_lines), preserve_lines=True)
+
+
+def count_meaningful_lines(text: str | None) -> int:
+    """Count non-empty lines after text sanitation."""
+
+    sanitized = sanitize_post_text(text)
+    if not sanitized:
+        return 0
+    return len([line for line in sanitized.splitlines() if line.strip()])
 
 
 def normalize_for_comparison(text: str | None) -> str:
@@ -143,12 +218,27 @@ def get_low_quality_reason(text: str | None) -> str | None:
     if all(line in LOW_SIGNAL_LINES for line in normalized_lines):
         return "media_placeholder"
 
-    if not sanitize_post_text(normalized_text):
+    sanitized = sanitize_post_text(normalized_text)
+    if not sanitized:
+        if _contains_only_removable_tail_content(normalized_text):
+            return "cta_only"
         return "empty_text"
+
+    line_count = count_meaningful_lines(sanitized)
+    words = WORD_PATTERN.findall(sanitized)
+    word_count = len(words)
+    if word_count < 8:
+        return "thin_post"
+    if line_count <= 1 and word_count < 10:
+        return "thin_post"
 
     compact = "".join(character for character in " ".join(normalized_lines) if character.isalnum())
     if not compact:
         return "empty_text"
+
+    sanitized_compact = "".join(character for character in sanitized if character.isalnum())
+    if not sanitized_compact:
+        return "cta_only"
     return None
 
 
@@ -180,11 +270,11 @@ def score_post_example(
     if is_low_quality_post(normalized):
         return float("-inf")
 
-    words = re.findall(r"\b\w+\b", normalized)
+    words = WORD_PATTERN.findall(normalized)
     word_count = len(words)
     unique_word_count = len({word.lower() for word in words})
     char_count = len(normalized)
-    effective_line_count = line_count or (normalized.count("\n") + 1 if normalized else 0)
+    effective_line_count = line_count or count_meaningful_lines(normalized)
 
     richness_score = min(word_count, 80) / 8.0
     density_score = min(char_count, 600) / 150.0

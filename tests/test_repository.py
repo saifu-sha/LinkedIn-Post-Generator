@@ -39,21 +39,34 @@ def test_repository_filters_posts_and_returns_sorted_tags(tmp_path):
         json.dumps(
             [
                 {
-                    "text": "Post A",
+                    "text": "Post A shares useful AI career lessons with clear and practical next steps.",
                     "engagement": 1,
                     "line_count": 3,
                     "language": "English",
                     "tags": ["AI", "Career"],
                 },
                 {
-                    "text": "Post B",
+                    "text": (
+                        "Post B explains how AI projects become more credible over time.\n"
+                        "Document your experiments.\n"
+                        "Share outcomes with context.\n"
+                        "Show what changed.\n"
+                        "Ask for feedback.\n"
+                        "Keep building proof."
+                    ),
                     "engagement": 2,
                     "line_count": 9,
                     "language": "English",
                     "tags": ["AI"],
                 },
                 {
-                    "text": "Post C",
+                    "text": (
+                        "Post C mixes Hindi and English ideas to explain AI growth clearly.\n"
+                        "Build projects consistently.\n"
+                        "Share learnings every week.\n"
+                        "Visible proof compounds over time.\n"
+                        "Stay patient and keep shipping."
+                    ),
                     "engagement": 3,
                     "line_count": 9,
                     "language": "Hinglish",
@@ -69,7 +82,14 @@ def test_repository_filters_posts_and_returns_sorted_tags(tmp_path):
     assert repository.get_tags() == ["AI", "Career"]
     assert repository.get_filtered_posts("Medium", "English", "AI") == [
         {
-            "text": "Post B",
+            "text": (
+                "Post B explains how AI projects become more credible over time.\n"
+                "Document your experiments.\n"
+                "Share outcomes with context.\n"
+                "Show what changed.\n"
+                "Ask for feedback.\n"
+                "Keep building proof."
+            ),
             "engagement": 2,
             "line_count": 9,
             "language": "English",
@@ -147,13 +167,6 @@ def test_repository_ranks_richer_examples_above_short_viral_titles(tmp_path):
             "text": rich_text,
             "engagement": 50,
             "line_count": 4,
-            "language": "English",
-            "tags": ["AI"],
-        },
-        {
-            "text": "AI jobs",
-            "engagement": 100000,
-            "line_count": 1,
             "language": "English",
             "tags": ["AI"],
         },

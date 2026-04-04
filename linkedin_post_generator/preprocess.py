@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Callable, Iterable, TypeVar
 
@@ -12,8 +13,11 @@ from .llm import extract_response_text, get_llm
 from .models import PostRecord, ProcessedPost, SUPPORTED_LANGUAGES, normalize_tags
 from .quality import (
     build_text_preview,
+    count_meaningful_lines,
     get_low_quality_reason,
+    normalize_for_comparison,
     sanitize_post_text,
+    score_post_example,
 )
 
 DEFAULT_MAX_RETRIES = 3
@@ -39,10 +43,9 @@ def build_metadata_prompt(post: str) -> str:
     """Build the prompt used to extract metadata from a post."""
 
     return (
-        "You are given a LinkedIn post. You need to extract number of lines, "
-        "language of the post and tags.\n"
+        "You are given a LinkedIn post. You need to extract the language of the post and tags.\n"
         "1. Return a valid JSON. No preamble.\n"
-        "2. JSON object should have exactly three keys: line_count, language and tags.\n"
+        "2. JSON object should have exactly two keys: language and tags.\n"
         "3. tags is an array of text tags. Extract maximum two tags.\n"
         '4. Language should be "English" or "Hinglish" (Hinglish means Hindi + English).\n\n'
         "Here is the actual post on which you need to perform this task:\n"
@@ -118,7 +121,7 @@ def invoke_json_prompt(prompt: str, *, llm_client: Any | None = None) -> dict[st
 
 
 def _validate_metadata(payload: dict[str, Any]) -> dict[str, Any]:
-    expected_keys = {"line_count", "language", "tags"}
+    expected_keys = {"language", "tags"}
     if set(payload) != expected_keys:
         raise LLMResponseError(
             f"Metadata response must contain exactly {sorted(expected_keys)}, got {sorted(payload)}."
@@ -128,13 +131,7 @@ def _validate_metadata(payload: dict[str, Any]) -> dict[str, Any]:
     if language not in SUPPORTED_LANGUAGES:
         raise LLMResponseError(f"Unsupported language {language!r} returned by the model.")
 
-    try:
-        line_count = int(payload["line_count"])
-    except (TypeError, ValueError) as error:
-        raise LLMResponseError("Metadata response contained a non-integer line_count.") from error
-
     return {
-        "line_count": line_count,
         "language": language,
         "tags": normalize_tags(payload["tags"])[:2],
     }
@@ -145,7 +142,12 @@ def extract_metadata(post: str, *, llm_client: Any | None = None) -> dict[str, A
 
     prompt = build_metadata_prompt(post)
     payload = invoke_json_prompt(prompt, llm_client=llm_client)
-    return _validate_metadata(payload)
+    metadata = _validate_metadata(payload)
+    return {
+        "line_count": count_meaningful_lines(post),
+        "language": metadata["language"],
+        "tags": metadata["tags"],
+    }
 
 
 def get_unified_tags(
@@ -253,6 +255,78 @@ def _run_with_retries(operation: Callable[[], T], *, max_retries: int) -> tuple[
     raise RuntimeError("Retry loop exited unexpectedly.")
 
 
+def _dedupe_rank(post: dict[str, Any]) -> tuple[float, int, int]:
+    text = sanitize_post_text(post.get("text", ""))
+    line_count = count_meaningful_lines(text)
+    engagement = int(post.get("engagement", 0) or 0)
+    return (
+        score_post_example(
+            text,
+            engagement=engagement,
+            tags=normalize_tags(post.get("tags", [])),
+            line_count=line_count,
+        ),
+        engagement,
+        len(text),
+    )
+
+
+def _is_near_duplicate(first: str, second: str, *, threshold: float = 0.90) -> bool:
+    if not first or not second:
+        return False
+    if first == second:
+        return True
+    return SequenceMatcher(None, first, second).ratio() >= threshold
+
+
+def _deduplicate_final_posts(
+    posts: list[tuple[int, dict[str, Any]]],
+    failures: list[dict[str, Any]],
+) -> list[tuple[int, dict[str, Any]]]:
+    retained: list[tuple[int, dict[str, Any], str]] = []
+
+    for index, post in posts:
+        comparison_text = normalize_for_comparison(post.get("text", ""))
+        duplicates = [
+            (retained_index, retained_post, retained_text)
+            for retained_index, retained_post, retained_text in retained
+            if _is_near_duplicate(comparison_text, retained_text)
+        ]
+        if not duplicates:
+            retained.append((index, post, comparison_text))
+            continue
+
+        candidates = duplicates + [(index, post, comparison_text)]
+        winner_index, winner_post, winner_text = max(
+            candidates,
+            key=lambda item: _dedupe_rank(item[1]),
+        )
+        for duplicate_index, duplicate_post, _ in candidates:
+            if duplicate_index == winner_index:
+                continue
+            failures.append(
+                _build_failure_record(
+                    duplicate_index,
+                    stage="final_deduplication",
+                    reason="near_duplicate",
+                    text=duplicate_post.get("text", ""),
+                    error=LowQualityPostError(
+                        f"Near-duplicate of retained record at index {winner_index}."
+                    ),
+                    attempts=1,
+                )
+            )
+
+        retained = [
+            item
+            for item in retained
+            if item[0] not in {duplicate_index for duplicate_index, _, _ in duplicates}
+        ]
+        retained.append((winner_index, winner_post, winner_text))
+
+    return [(index, post) for index, post, _ in sorted(retained, key=lambda item: item[0])]
+
+
 def process_posts(
     raw_file_path: str | Path,
     processed_file_path: str | Path | None = None,
@@ -309,7 +383,7 @@ def process_posts(
                 _build_failure_record(
                     index,
                     stage="quality_filter",
-                    reason="filtered_low_quality",
+                    reason=low_quality_reason,
                     text=raw_post.text,
                     error=LowQualityPostError(low_quality_reason),
                     attempts=1,
@@ -365,8 +439,7 @@ def process_posts(
                 )
             )
 
-    retained_checkpoint_posts: dict[int, dict[str, Any]] = {}
-    final_posts: list[dict[str, Any]] = []
+    final_candidates: list[tuple[int, dict[str, Any]]] = []
     for index in sorted(successful_posts):
         checkpoint_post = successful_posts[index]
         cleaned_text = sanitize_post_text(checkpoint_post.get("text", ""))
@@ -376,7 +449,7 @@ def process_posts(
                 _build_failure_record(
                     index,
                     stage="final_quality_filter",
-                    reason="filtered_low_quality",
+                    reason=low_quality_reason,
                     text=cleaned_text,
                     error=LowQualityPostError(low_quality_reason),
                     attempts=1,
@@ -384,18 +457,28 @@ def process_posts(
             )
             continue
 
-        retained_checkpoint_posts[index] = checkpoint_post
         normalized_tags = [
             unified_tags.get(tag, tag)
             for tag in normalize_tags(checkpoint_post.get("tags", []))
         ]
-        final_posts.append(
-            {
-                **checkpoint_post,
-                "text": cleaned_text,
-                "tags": list(dict.fromkeys(normalized_tags)),
-            }
+        final_candidates.append(
+            (
+                index,
+                {
+                    **checkpoint_post,
+                    "text": cleaned_text,
+                    "line_count": count_meaningful_lines(cleaned_text),
+                    "tags": list(dict.fromkeys(normalized_tags)),
+                },
+            )
         )
+
+    deduplicated_posts = _deduplicate_final_posts(final_candidates, failures)
+    retained_checkpoint_posts = {
+        index: post
+        for index, post in deduplicated_posts
+    }
+    final_posts = [post for _, post in deduplicated_posts]
 
     target_path.parent.mkdir(parents=True, exist_ok=True)
     with target_path.open(encoding="utf-8", mode="w") as outfile:
