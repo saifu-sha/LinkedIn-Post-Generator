@@ -11,3 +11,5 @@ htmlcov/
 build/
 dist/
 *.egg-info/
+data/*.checkpoint.json
+data/*.failures.json
