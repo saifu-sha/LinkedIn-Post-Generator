@@ -2,6 +2,7 @@ import importlib.util
 from pathlib import Path
 
 import few_shots
+import linkedin_post_generator
 import llm_helper
 import post_generator
 import preprocess
@@ -17,7 +18,11 @@ def load_module_from_path(path: Path, module_name: str):
 
 def test_root_wrappers_expose_expected_symbols():
     assert callable(few_shots.FewShotPosts)
+    assert callable(linkedin_post_generator.generate_post_variants)
+    assert linkedin_post_generator.GenerationOptions.__name__ == "GenerationOptions"
     assert callable(post_generator.generate_post)
+    assert callable(post_generator.generate_post_variants)
+    assert post_generator.GenerationOptions.__name__ == "GenerationOptions"
     assert callable(preprocess.process_posts)
     assert llm_helper.llm.__class__.__name__ == "LazyLLM"
 

@@ -22,7 +22,7 @@ The codebase has two layers:
 - `linkedin_post_generator/repository.py`
   Loads and filters processed posts for few-shot prompting.
 - `linkedin_post_generator/generator.py`
-  Builds prompts and generates LinkedIn posts.
+  Builds prompts, applies typed style controls, and generates single or multi-variant LinkedIn posts.
 - `linkedin_post_generator/preprocess.py`
   Enriches raw scraped posts with metadata and unified tags.
 - `linkedin_post_generator/ui.py`
@@ -37,7 +37,7 @@ The codebase has two layers:
 - `preprocess.py`
   Runs the preprocessing pipeline.
 - `post_generator.py`
-  Re-exports generation helpers.
+  Re-exports generation helpers, typed options, and variant generation helpers.
 - `few_shots.py`
   Re-exports repository helpers.
 - `llm_helper.py`
@@ -128,7 +128,8 @@ python preprocess.py
 What this does:
 
 - reads `data/raw_posts.json`
-- asks the LLM to extract `line_count`, `language`, and `tags`
+- computes `line_count` locally
+- asks the LLM to extract `language` and `tags`
 - asks the LLM to unify similar tags
 - saves output to `data/processed_posts.json`
 
@@ -142,9 +143,10 @@ What this does:
 
 - loads `data/processed_posts.json`
 - shows tag, length, and language selectors
-- builds a prompt using matching example posts
+- shows advanced controls for tone, audience, goal, voice, CTA strength, and hashtag count
+- builds a prompt using the best matching example posts with fallback retrieval
 - calls the Groq model
-- displays the generated post
+- displays three generated post variants
 
 ## Development Commands
 

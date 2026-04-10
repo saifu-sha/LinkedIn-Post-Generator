@@ -8,6 +8,11 @@ from typing import Any, Mapping
 from .quality import normalize_post_text
 
 SUPPORTED_LANGUAGES = {"English", "Hinglish"}
+GENERATION_TONE_OPTIONS = ("Professional", "Conversational", "Bold")
+GENERATION_AUDIENCE_OPTIONS = ("General", "Job Seekers", "Founders", "Developers")
+GENERATION_GOAL_OPTIONS = ("Match examples", "Educate", "Inspire", "Announce")
+GENERATION_VOICE_OPTIONS = ("Match examples", "First Person", "Brand/Company")
+GENERATION_CTA_STRENGTH_OPTIONS = ("None", "Soft", "Strong")
 
 
 def normalize_tags(value: Any) -> list[str]:
@@ -37,6 +42,36 @@ def coerce_int(value: Any, *, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+@dataclass(frozen=True, slots=True)
+class GenerationOptions:
+    """Typed controls used to shape generation prompts."""
+
+    tone: str = "Professional"
+    audience: str = "General"
+    goal: str = "Match examples"
+    voice: str = "Match examples"
+    cta_strength: str = "None"
+    hashtag_count: int = 0
+
+    def __post_init__(self) -> None:
+        self._validate_choice("tone", self.tone, GENERATION_TONE_OPTIONS)
+        self._validate_choice("audience", self.audience, GENERATION_AUDIENCE_OPTIONS)
+        self._validate_choice("goal", self.goal, GENERATION_GOAL_OPTIONS)
+        self._validate_choice("voice", self.voice, GENERATION_VOICE_OPTIONS)
+        self._validate_choice(
+            "cta_strength",
+            self.cta_strength,
+            GENERATION_CTA_STRENGTH_OPTIONS,
+        )
+        if not isinstance(self.hashtag_count, int) or not 0 <= self.hashtag_count <= 3:
+            raise ValueError("hashtag_count must be an integer between 0 and 3.")
+
+    @staticmethod
+    def _validate_choice(name: str, value: str, options: tuple[str, ...]) -> None:
+        if value not in options:
+            raise ValueError(f"Unsupported {name} {value!r}.")
 
 
 @dataclass(slots=True)
