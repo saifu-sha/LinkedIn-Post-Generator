@@ -127,8 +127,8 @@ def _line_layout_instruction(length: str) -> str:
 
 def _emoji_style_instruction() -> str:
     return (
-        "Use 1-2 relevant professional emojis only when they feel natural; "
-        "do not use emojis on every line."
+        "Include 1-2 relevant professional emojis in the post; place them naturally in the hook, "
+        "a key transition, or the CTA, and do not use emojis on every line."
     )
 
 

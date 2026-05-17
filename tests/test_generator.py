@@ -140,7 +140,8 @@ def test_build_variants_prompt_requests_json_three_variants_and_locked_angles():
     assert "do not add blank spacer lines between every sentence." in prompt
     assert "Keep one short idea per line, with no empty line between every sentence." in prompt
     assert "Do not use markdown bullets unless they genuinely improve readability." in prompt
-    assert "Use 1-2 relevant professional emojis only when they feel natural" in prompt
+    assert "Include 1-2 relevant professional emojis in the post" in prompt
+    assert "place them naturally in the hook, a key transition, or the CTA" in prompt
     assert "do not use emojis on every line." in prompt
     assert 'encode those line breaks inside each string as "\\n"' in prompt
     assert "If hashtags are included, place them alone on the final line only." in prompt
