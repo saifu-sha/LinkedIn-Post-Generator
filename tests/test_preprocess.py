@@ -268,6 +268,59 @@ def test_process_posts_resumes_from_checkpoint_without_repeating_metadata(tmp_pa
     assert "I will give you a list of tags." in llm.prompts[0]
 
 
+def test_process_posts_ignores_checkpoint_entries_from_previous_raw_file(tmp_path):
+    raw_path = tmp_path / "raw_posts.json"
+    processed_path = tmp_path / "processed_posts.json"
+    checkpoint_path = tmp_path / "processed_posts.checkpoint.json"
+    current_text = "Current raw post explains a practical career lesson with enough detail."
+    stale_text = "Stale checkpoint post from a previous scrape should not be reused."
+
+    raw_path.write_text(
+        json.dumps([{"text": current_text, "engagement": 12}]),
+        encoding="utf-8",
+    )
+    checkpoint_path.write_text(
+        json.dumps(
+            {
+                "records": [
+                    {
+                        "index": 0,
+                        "post": {
+                            "text": stale_text,
+                            "engagement": 99,
+                            "line_count": 1,
+                            "language": "English",
+                            "tags": ["Old"],
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    llm = StubLLM(
+        [
+            json.dumps({"language": "English", "tags": ["Career"]}),
+            json.dumps({"Career": "Career Growth"}),
+        ]
+    )
+
+    processed_posts = process_posts(raw_path, processed_path, llm_client=llm)
+
+    assert processed_posts == [
+        {
+            "text": current_text,
+            "engagement": 12,
+            "line_count": 1,
+            "language": "English",
+            "tags": ["Career Growth"],
+        }
+    ]
+    assert stale_text not in processed_path.read_text(encoding="utf-8")
+    assert len(llm.prompts) == 2
+
+
 def test_process_posts_reports_quality_and_retry_exhaustion(tmp_path):
     raw_path = tmp_path / "raw_posts.json"
     processed_path = tmp_path / "processed_posts.json"

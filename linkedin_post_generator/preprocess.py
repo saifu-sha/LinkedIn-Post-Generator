@@ -198,6 +198,34 @@ def _load_checkpoint(checkpoint_path: Path) -> dict[int, dict[str, Any]]:
     return checkpointed_posts
 
 
+def _checkpoint_matches_raw_item(
+    index: int,
+    checkpoint_post: dict[str, Any],
+    raw_items: list[Any],
+) -> bool:
+    """Return whether a checkpoint record still belongs to the current raw input."""
+
+    if not 0 <= index < len(raw_items):
+        return False
+
+    raw_item = raw_items[index]
+    if not isinstance(raw_item, dict):
+        return False
+
+    try:
+        raw_post = PostRecord.from_mapping(raw_item, index=index)
+    except ValueError:
+        return False
+
+    checkpoint_text = normalize_for_comparison(
+        sanitize_post_text(checkpoint_post.get("text", ""))
+    )
+    raw_text = normalize_for_comparison(sanitize_post_text(raw_post.text))
+    checkpoint_engagement = int(checkpoint_post.get("engagement", 0) or 0)
+
+    return checkpoint_text == raw_text and checkpoint_engagement == raw_post.engagement
+
+
 def _write_checkpoint(checkpoint_path: Path, checkpointed_posts: dict[int, dict[str, Any]]) -> None:
     """Write checkpointed successful records to disk."""
 
@@ -366,7 +394,7 @@ def process_posts(
     successful_posts = {
         index: post
         for index, post in checkpointed_posts.items()
-        if 0 <= index < len(payload)
+        if _checkpoint_matches_raw_item(index, post, payload)
     }
     failures: list[dict[str, Any]] = []
 

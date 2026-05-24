@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import threading
 import time
+from pathlib import Path
 
 import requests
+from selenium.common.exceptions import NoSuchDriverException
 from selenium import webdriver
 from selenium.common.exceptions import NoSuchElementException
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.selenium_manager import SeleniumManager
 from selenium_stealth import stealth
 
 from ..config import ScraperSettings
@@ -26,10 +30,26 @@ def build_chrome_options() -> Options:
     return options
 
 
+def build_chrome_service() -> ChromeService:
+    """Create a ChromeDriver service while ignoring stale drivers on PATH."""
+
+    manager_result = SeleniumManager().binary_paths(
+        ["--browser", "chrome", "--skip-driver-in-path"]
+    )
+    driver_path = manager_result.get("driver_path")
+    if not driver_path or not Path(driver_path).is_file():
+        raise NoSuchDriverException("Selenium Manager did not return a valid ChromeDriver path.")
+
+    return ChromeService(
+        executable_path=driver_path,
+        driver_path_env_key="LINKEDIN_POST_GENERATOR_CHROMEDRIVER",
+    )
+
+
 def create_driver() -> webdriver.Chrome:
     """Create and configure a Selenium Chrome driver."""
 
-    driver = webdriver.Chrome(options=build_chrome_options())
+    driver = webdriver.Chrome(service=build_chrome_service(), options=build_chrome_options())
     stealth(
         driver,
         languages=["en-US", "en"],
